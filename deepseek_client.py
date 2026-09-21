@@ -1,0 +1,218 @@
+import os
+from openai import OpenAI
+from dotenv import load_dotenv
+import json
+import httpx
+from typing import Literal
+
+
+load_dotenv()
+
+api_key = os.getenv("DEEPSEEK_API_KEY")
+
+if api_key is None:
+    raise RuntimeError("没有找到 DEEPSEEK_API_KEY 环境变量")
+
+client = OpenAI(
+    api_key=api_key,
+    base_url="https://api.deepseek.com",
+)
+
+
+tools = [
+    {
+        "type":"function",
+        "function":{
+            "name":"get_order",
+            "description":"根据订单编号查询真实的订单信息",
+            "parameters":{
+                "type":"object",
+                "properties":{
+                    "order_id":{
+                        "type":"string",
+                        "description":"需要查询的订单编号,例如A1001",
+                    }
+                },
+                "required":["order_id"],
+                "additionalProperties":False,
+            }
+        }
+    },
+    {
+        "type":"function",
+        "function":{
+            "name":"list_orders",
+            "description":"查询所有真实订单信息,可以根据status和product分类查询",
+            "parameters":{
+                "type":"object",
+                "properties":{
+                    "status":{
+                        "type":"string",
+                        "description":"订单所处的状态,只有待发货,已发货,已取消"
+                    },
+                    "product":{
+                        "type":"string",
+                        "description":"商品的名称，如电脑，笔记本"
+                    },
+                    "offset":{
+                        "type":"integer",
+                        "description":"跳过offset条记录,用于分页"
+                    },
+                    "limit":{
+                        "type":"integer",
+                        "description":"最大展示多少条订单"
+                    }
+                }
+            },
+            "additionalProperties":False
+        }
+    },
+    {
+        "type":"function",
+        "function":{
+            "name":"change_order_status",
+            "description":"修改订单物流状态",
+            "parameters":{
+                "type":"object",
+                "properties":{
+                    "order_id":{
+                        "type":"string",
+                        "description":"需要修改的订单的编号"
+                    },
+                    "status":{
+                        "type":"string",
+                        "description":"实际需要修改的状态"
+                    }
+                },
+                "required":["order_id","status"],
+                "additionProperties":False
+            }
+        }
+    }
+]
+
+def call_model(messages):
+    response = client.chat.completions.create(
+        model="deepseek-flash",
+        messages=messages,
+        tools=tools,
+        tool_choice="auto",
+        stream=False,
+        extra_body={
+            "thinking":{
+                "type":"disabled",
+            }
+        }
+    )
+    return response.choices[0].message
+
+ORDER_API_BASE_URL = "http://127.0.0.1:8000"
+
+def get_order(order_id:str) -> dict:
+    api_response = httpx.get(
+        f"{ORDER_API_BASE_URL}/orders/{order_id}",
+        timeout=5.0,
+    )
+
+    if api_response.status_code == 404:
+        return {
+            "error":"订单不存在",
+            "order_id":order_id
+        }
+
+    api_response.raise_for_status()
+    return api_response.json()
+
+
+def list_orders(status:str|None = None,product:str|None = None,offset:int=0,limit:int =10):
+    params = {"offset":offset,"limit":limit}
+    if status is not None:
+        params["status"] = status
+    if product is not None:
+        params["product"] = product
+
+    api_response=httpx.get(f"{ORDER_API_BASE_URL}/orders",params=params,timeout=5)
+
+    api_response.raise_for_status()
+    return api_response.json()
+
+OrderStatus = Literal["已发货","待发货","已取消"]
+
+def change_order_status(order_id:str,status:OrderStatus):
+    get_order_response = httpx.get(f"{ORDER_API_BASE_URL}/orders/{order_id}")
+    if get_order_response.status_code == 404:
+        return {"error":"订单不存在"}
+    print(get_order_response)
+    conform = input(f"确认将订单状态改为{status}么，Y/N")
+    if conform == "Y":
+        
+        api_response = httpx.patch(f"{ORDER_API_BASE_URL}/orders/{order_id}/status",json={"status":status},timeout=5)
+        print("实际方法：", api_response.request.method)
+        print("实际 URL：", api_response.request.url)
+        print("响应状态：", api_response.status_code)        
+        print("修改响应状态：",api_response.status_code)
+        return api_response.json()
+    elif conform == "N":
+        return{"error":"用户取消了更改"}
+    else:
+        return{"error":"用户确认不规范，需要输入Y/N"}
+
+
+TOOL_FUNCTIONS = {
+    "get_order": get_order,
+    "list_orders":list_orders,
+    "change_order_status":change_order_status,
+}
+
+
+def run_agent(
+        user_question:str,
+        messages:list,
+        max_rounds:int = 5,
+):
+    messages.append({"role":"user","content":user_question})
+
+    round_count = 0
+
+    while round_count<max_rounds:
+        round_count+=1
+
+        message = call_model(messages=messages)
+
+        if not message.tool_calls:
+            messages.append(message)
+            return message.content
+        
+        messages.append(message)
+        for tool_call in message.tool_calls:
+            tool_name = tool_call.function.name
+            arguments_text = tool_call.function.arguments
+            arguments = json.loads(arguments_text)
+
+            function = TOOL_FUNCTIONS.get(tool_name)
+            if function is None:
+                raise RuntimeError(f"不允许调用工具：{tool_name}")
+
+            print("工具:",tool_name,"参数:",arguments)
+            try:
+                tool_result = function(**arguments)
+            except httpx.RequestError:
+                tool_result = {"error":"订单服务暂时无法连接"}
+            messages.append(
+                {
+                    "role":"tool",
+                    "tool_call_id":tool_call.id,
+                    "content":json.dumps(tool_result,ensure_ascii=False)
+                },
+            )
+
+    raise RuntimeError(f"Agent执行超过最大次数：{max_rounds}")
+
+messages = [{"role":"system","content":"你是一个订单客服助手。"}]
+
+while True:
+    question = input("请输入问题：")
+    if question == "退出" or question == "q":
+        break
+    answer = run_agent(question,messages)
+    print("最终回答：",answer)
