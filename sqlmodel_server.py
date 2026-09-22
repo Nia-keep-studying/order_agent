@@ -44,6 +44,8 @@ def get_session():
     with Session(engine) as session:
         yield session
 
+def can_status_change(old_status:str,new_status:OrderStatus)->bool:
+    return not(old_status == "已取消" and new_status != "已取消")
 
 def add_order(order_data: OrderCreate,session:Session):
     order = Order(**order_data.model_dump())
@@ -71,6 +73,8 @@ def update_order_status(order_id:str,new_status:OrderStatus,session:Session):
     order = session.get(Order,order_id)
     if order is None:
         return None
+    if can_status_change(old_status=order.status,new_status=new_status) == False:
+        return False
     order.status = new_status
     session.add(order)
     session.commit()
@@ -97,6 +101,8 @@ def order_update(order_id:str,update_data:OrderUpdate,session:Session):
     order = session.get(Order,order_id)
     if order is None:
         return None
+    if can_status_change(old_status=order.status,new_status=update_data.status) == False:
+        return False
     order.product = update_data.product
     order.status = update_data.status
 
@@ -133,9 +139,12 @@ def create_order(new_order:OrderCreate,session:Session = Depends(get_session)):
 
 @app.patch("/orders/{order_id}/status")
 def change_order_status(order_id:str,update_data:OrderStatusUpdate,session:Session = Depends(get_session)):
+
     order = update_order_status(order_id,new_status=update_data.status,session=session)
     if order is None:
         raise HTTPException(status_code=404,detail="订单未找到")
+    if order == False:
+        raise HTTPException(status_code=403,detail="无法修改已取消的订单状态")
     return order
 
 @app.delete("/orders/{order_id}",status_code=204)
@@ -147,9 +156,15 @@ def remove_order(order_id:str,session:Session = Depends(get_session)):
 
 @app.put("/orders/{order_id}")
 def update_order(order_id:str,update_data:OrderUpdate,session:Session = Depends(get_session)):
+    order = session.get(Order,order_id)
+    if order is None:
+        raise HTTPException(status_code=404,detail="没找到订单")
     updated = order_update(order_id=order_id,update_data=update_data,session=session)
     if updated is None:
-        raise HTTPException(status_code=404,detail="没找到订单")
+        raise HTTPException(status_code=404,detail="没有找到对应订单")
+    elif updated == False:
+        raise HTTPException(status_code=403,detail="无法更改已经取消的订单")
+    
     return updated
 
 

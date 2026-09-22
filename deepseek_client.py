@@ -4,7 +4,10 @@ from dotenv import load_dotenv
 import json
 import httpx
 from typing import Literal
+import logging
 
+logging.basicConfig(level=logging.INFO,format="%(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -62,9 +65,9 @@ tools = [
                         "type":"integer",
                         "description":"最大展示多少条订单"
                     }
-                }
-            },
-            "additionalProperties":False
+                },"additionalProperties":False
+            }
+            
         }
     },
     {
@@ -85,7 +88,7 @@ tools = [
                     }
                 },
                 "required":["order_id","status"],
-                "additionProperties":False
+                "additionalProperties":False
             }
         }
     }
@@ -142,17 +145,18 @@ def change_order_status(order_id:str,status:OrderStatus):
     get_order_response = httpx.get(f"{ORDER_API_BASE_URL}/orders/{order_id}")
     if get_order_response.status_code == 404:
         return {"error":"订单不存在"}
-    print(get_order_response)
     conform = input(f"确认将订单状态改为{status}么，Y/N")
-    if conform == "Y":
+    if conform.lower() == "y":
         
         api_response = httpx.patch(f"{ORDER_API_BASE_URL}/orders/{order_id}/status",json={"status":status},timeout=5)
-        print("实际方法：", api_response.request.method)
-        print("实际 URL：", api_response.request.url)
-        print("响应状态：", api_response.status_code)        
-        print("修改响应状态：",api_response.status_code)
+        if api_response.status_code == 403:
+            error_result = api_response.json()
+            return {"error":error_result["detail"],"status_code":api_response.status_code}
+        elif api_response.status_code != 200:
+            
+            return {"error":"请求接口时发生错误","status_code":api_response.status_code}
         return api_response.json()
-    elif conform == "N":
+    elif conform.lower() == "n":
         return{"error":"用户取消了更改"}
     else:
         return{"error":"用户确认不规范，需要输入Y/N"}
@@ -193,11 +197,21 @@ def run_agent(
             if function is None:
                 raise RuntimeError(f"不允许调用工具：{tool_name}")
 
-            print("工具:",tool_name,"参数:",arguments)
+            logger.info(
+                "第 %s 轮调用工具 %s ,调用 ID= %s ,参数字段=%s",
+                round_count,tool_name,tool_call.id,list(arguments),
+            )
             try:
                 tool_result = function(**arguments)
             except httpx.RequestError:
                 tool_result = {"error":"订单服务暂时无法连接"}
+            except httpx.HTTPStatusError as exc:
+                tool_result = {"error":"订单服务返回错误","status_code":exc.response.status_code,"msg":exc.response.json()["detail"][0]["msg"]}
+
+            if isinstance(tool_result, dict) and "error" in tool_result:
+                logger.warning("工具 %s 失败：%s", tool_name, tool_result["error"])
+            else:
+                logger.info("工具 %s 执行成功", tool_name)
             messages.append(
                 {
                     "role":"tool",
