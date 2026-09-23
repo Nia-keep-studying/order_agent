@@ -67,7 +67,7 @@ tools = [
                     }
                 },"additionalProperties":False
             }
-            
+
         }
     },
     {
@@ -142,24 +142,44 @@ def list_orders(status:str|None = None,product:str|None = None,offset:int=0,limi
 OrderStatus = Literal["已发货","待发货","已取消"]
 
 def change_order_status(order_id:str,status:OrderStatus):
-    get_order_response = httpx.get(f"{ORDER_API_BASE_URL}/orders/{order_id}")
-    if get_order_response.status_code == 404:
-        return {"error":"订单不存在"}
-    conform = input(f"确认将订单状态改为{status}么，Y/N")
+    current_order = get_order(order_id=order_id)
+    if "error" in current_order:
+        return current_order
+    if current_order["status"] == status:
+        return {
+            "message":"订单已经处于目标状态",
+            "order":current_order
+            }
+
+    conform = input(
+        f"确认订单 {order_id} 的订单状态将由 {current_order['status']} 改为 {status} 吗"
+    )
     if conform.lower() == "y":
-        
         api_response = httpx.patch(f"{ORDER_API_BASE_URL}/orders/{order_id}/status",json={"status":status},timeout=5)
         if api_response.status_code == 403:
             error_result = api_response.json()
             return {"error":error_result["detail"],"status_code":api_response.status_code}
         elif api_response.status_code != 200:
-            
             return {"error":"请求接口时发生错误","status_code":api_response.status_code}
         return api_response.json()
+
+    # get_order_response = httpx.get(f"{ORDER_API_BASE_URL}/orders/{order_id}")
+    # if get_order_response.status_code == 404:
+
+    #     return {"error":"订单不存在"}
+    # conform = input(f"确认将订单状态改为{status}么,Y/N")
+    # if conform.lower() == "y":
+    #     api_response = httpx.patch(f"{ORDER_API_BASE_URL}/orders/{order_id}/status",json={"status":status},timeout=5)
+    #     if api_response.status_code == 403:
+    #         error_result = api_response.json()
+    #         return {"error":error_result["detail"],"status_code":api_response.status_code}
+    #     elif api_response.status_code != 200:
+    #         return {"error":"请求接口时发生错误","status_code":api_response.status_code}
+    #     return api_response.json()
     elif conform.lower() == "n":
         return{"error":"用户取消了更改"}
     else:
-        return{"error":"用户确认不规范，需要输入Y/N"}
+        return{"error":"用户确认不规范,需要输入Y/N"}
 
 
 TOOL_FUNCTIONS = {
@@ -168,6 +188,17 @@ TOOL_FUNCTIONS = {
     "change_order_status":change_order_status,
 }
 
+def get_http_error_message(response:httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        return "订单服务返回了无法解析的错误"
+    detail = data.get("detail")
+    if isinstance(detail,str):
+        return detail
+    if isinstance(detail,list) and detail:
+        return detail[0].get("msg","订单服务返回未知错误")
+    return "订单服务返回未知错误"
 
 def run_agent(
         user_question:str,
@@ -186,16 +217,46 @@ def run_agent(
         if not message.tool_calls:
             messages.append(message)
             return message.content
-        
+
         messages.append(message)
         for tool_call in message.tool_calls:
             tool_name = tool_call.function.name
             arguments_text = tool_call.function.arguments
-            arguments = json.loads(arguments_text)
+
+            try:
+                arguments = json.loads(arguments_text)
+            except json.JSONDecodeError:
+                tool_result = {"error":"工具参数不是合法JSON"}
+                messages.append(
+                    {
+                        "role":"tool",
+                        "tool_call_id":tool_call.id,
+                        "content":json.dumps(tool_result,ensure_ascii=False)
+                    }
+                )
+                continue
+            if not isinstance(arguments,dict):
+                tool_result = {"error":"参数不是字典类型"}
+                messages.append(
+                    {
+                        "role":"tool",
+                        "tool_call_id":tool_call.id,
+                        "content":json.dumps(tool_result,ensure_ascii=False)
+                    }
+                )
+                continue
 
             function = TOOL_FUNCTIONS.get(tool_name)
             if function is None:
-                raise RuntimeError(f"不允许调用工具：{tool_name}")
+                tool_result = {"error":f"不允许调用工具{tool_name}"}
+                messages.append(
+                    {
+                        "role":"tool",
+                        "tool_call_id":tool_call.id,
+                        "content":json.dumps(tool_result,ensure_ascii=False)
+                    }
+                )
+                continue
 
             logger.info(
                 "第 %s 轮调用工具 %s ,调用 ID= %s ,参数字段=%s",
@@ -203,10 +264,17 @@ def run_agent(
             )
             try:
                 tool_result = function(**arguments)
+            except TypeError as exc:
+                logger.warning("工具参数错误：%s",exc)
+                tool_result = {"error":"工具参数缺失或字段错误"}
             except httpx.RequestError:
                 tool_result = {"error":"订单服务暂时无法连接"}
             except httpx.HTTPStatusError as exc:
-                tool_result = {"error":"订单服务返回错误","status_code":exc.response.status_code,"msg":exc.response.json()["detail"][0]["msg"]}
+                tool_result =  {
+                    "error":"订单服务返回错误",
+                    "status_code":exc.response.status_code,
+                    "msg":get_http_error_message(exc.response)
+                }
 
             if isinstance(tool_result, dict) and "error" in tool_result:
                 logger.warning("工具 %s 失败：%s", tool_name, tool_result["error"])
