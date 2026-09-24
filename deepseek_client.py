@@ -45,7 +45,7 @@ tools = [
         "type":"function",
         "function":{
             "name":"list_orders",
-            "description":"查询所有真实订单信息,可以根据status和product分类查询",
+            "description":"查询所有真实订单信息,可以根据status和product以及product_keyword分类查询",
             "parameters":{
                 "type":"object",
                 "properties":{
@@ -56,6 +56,10 @@ tools = [
                     "product":{
                         "type":"string",
                         "description":"商品的名称，如电脑，笔记本"
+                    },
+                    "product_keyword":{
+                        "type":"string",
+                        "description":"商品名称的模糊查询,适用于没有给出完整商品名称时使用"
                     },
                     "offset":{
                         "type":"integer",
@@ -127,13 +131,14 @@ def get_order(order_id:str) -> dict:
     return api_response.json()
 
 
-def list_orders(status:str|None = None,product:str|None = None,offset:int=0,limit:int =10):
+def list_orders(status:str|None = None,product:str|None = None,product_keyword:str|None = None,offset:int=0,limit:int =10):
     params = {"offset":offset,"limit":limit}
     if status is not None:
         params["status"] = status
     if product is not None:
         params["product"] = product
-
+    if product_keyword is not None:
+        params["product_keyword"] = product_keyword
     api_response=httpx.get(f"{ORDER_API_BASE_URL}/orders",params=params,timeout=5)
 
     api_response.raise_for_status()
@@ -146,41 +151,25 @@ def change_order_status(order_id:str,status:OrderStatus):
     if "error" in current_order:
         return current_order
     if current_order["status"] == status:
-        return {
-            "message":"订单已经处于目标状态",
-            "order":current_order
-            }
-
+        return {"result":"no_change","message":f"该订单状态已经是 {status} 无需更改","data":current_order}
     conform = input(
-        f"确认订单 {order_id} 的订单状态将由 {current_order['status']} 改为 {status} 吗"
+        f"是否确定将订单 {order_id} 的状态"
+        f"由 {current_order['status']}  改为 {status}  "
+        f"确认输入 y 不确认输入 n"
     )
-    if conform.lower() == "y":
-        api_response = httpx.patch(f"{ORDER_API_BASE_URL}/orders/{order_id}/status",json={"status":status},timeout=5)
+    if conform.strip().lower() == "y":
+        api_response = httpx.patch(f"{ORDER_API_BASE_URL}/orders/{order_id}/status", json={"status": status}, timeout=5)
+
         if api_response.status_code == 403:
-            error_result = api_response.json()
-            return {"error":error_result["detail"],"status_code":api_response.status_code}
-        elif api_response.status_code != 200:
-            return {"error":"请求接口时发生错误","status_code":api_response.status_code}
-        return api_response.json()
-
-    # get_order_response = httpx.get(f"{ORDER_API_BASE_URL}/orders/{order_id}")
-    # if get_order_response.status_code == 404:
-
-    #     return {"error":"订单不存在"}
-    # conform = input(f"确认将订单状态改为{status}么,Y/N")
-    # if conform.lower() == "y":
-    #     api_response = httpx.patch(f"{ORDER_API_BASE_URL}/orders/{order_id}/status",json={"status":status},timeout=5)
-    #     if api_response.status_code == 403:
-    #         error_result = api_response.json()
-    #         return {"error":error_result["detail"],"status_code":api_response.status_code}
-    #     elif api_response.status_code != 200:
-    #         return {"error":"请求接口时发生错误","status_code":api_response.status_code}
-    #     return api_response.json()
-    elif conform.lower() == "n":
-        return{"error":"用户取消了更改"}
+            error_data = api_response.json()
+            return {"result":"rejected","message":error_data["detail"],"status_code":403}
+        api_response.raise_for_status()
+        updated_order = api_response.json()
+        return {"result":"success","message":"订单修改成功","data":updated_order}
+    elif conform.strip().lower() == "n":
+        return {"result":"cancelled","message":"用户取消了修改"}
     else:
-        return{"error":"用户确认不规范,需要输入Y/N"}
-
+        return {"error":"用户的确认不合法,请输入y/n"}
 
 TOOL_FUNCTIONS = {
     "get_order": get_order,
@@ -276,10 +265,20 @@ def run_agent(
                     "msg":get_http_error_message(exc.response)
                 }
 
+            if isinstance(tool_result,dict):
+                operation_result = tool_result.get("result")
+            else:
+                operation_result = None
+
             if isinstance(tool_result, dict) and "error" in tool_result:
                 logger.warning("工具 %s 失败：%s", tool_name, tool_result["error"])
+            elif operation_result == "rejected":
+                logger.warning("工具 %s 被业务规则拒绝： %s",tool_name,tool_result["message"])
+            elif operation_result in {"cancelled","no_change"}:
+                logger.info("工具 %s 未执行写入： %s",tool_name,tool_result["message"])
             else:
-                logger.info("工具 %s 执行成功", tool_name)
+                logger.info("工具 %s 成功执行",tool_name)
+
             messages.append(
                 {
                     "role":"tool",

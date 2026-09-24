@@ -1,6 +1,6 @@
-fastapi
-uvicorn
-sqlmodel
-openai
-httpx
-python-dotenv
+fastapi==0.141.1
+uvicorn==0.53.0
+sqlmodel==0.0.42
+openai==3.16.2
+httpx==0.28.1
+python-dotenv==1.2.3

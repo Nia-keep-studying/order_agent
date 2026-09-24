@@ -56,13 +56,15 @@ def add_order(order_data: OrderCreate,session:Session):
     session.refresh(order)
     return order
 
-def get_orders(session:Session,status:OrderStatus|None = None,offset:int = 0,limit:int = 10,product:str|None = None):
-    
+def get_orders(session:Session,status:OrderStatus|None = None,offset:int = 0,limit:int = 10,product:str|None = None,product_keyword:str|None = None):
+
     statement = select(Order)
     if status is not None:
         statement = statement.where(Order.status == status)
     if product is not None:
         statement = statement.where(Order.product == product)
+    if product_keyword is not None:
+        statement = statement.where(Order.product.like(f"%{product_keyword}%"))
     statement = statement.offset(offset).limit(limit)
     orders = session.exec(statement).all()
 
@@ -114,11 +116,12 @@ def order_update(order_id:str,update_data:OrderUpdate,session:Session):
 def read_orders(
     status:OrderStatus|None = None,
     product:str|None = None,
+    product_keyword:str|None = None,
     offset:int = Query(default=0,ge=0),
     limit:int = Query(default=10,ge=1,le=100),
     session:Session = Depends(get_session)
     ):
-    orders = get_orders(status=status,offset=offset,limit=limit,session=session,product=product)
+    orders = get_orders(status=status,offset=offset,limit=limit,session=session,product=product,product_keyword=product_keyword)
     return orders
 
 @app.get("/orders/{order_id}")
@@ -176,6 +179,3 @@ def update_order(order_id:str,update_data:OrderUpdate,session:Session = Depends(
 # print(order.product)
 # print(order.status)
 
-
-
-    
